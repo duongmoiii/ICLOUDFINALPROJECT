@@ -1,217 +1,129 @@
-const $ = (s) => document.querySelector(s);
-const money = (n) => Number(n || 0).toLocaleString("vi-VN") + " đ";
-const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-let me = null, cart = [], productsCache = [], editingId = null, pimage = null, timer;
+const $=(s)=>document.querySelector(s);
+const esc=(s)=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const money=(n)=>Number(n||0).toLocaleString("vi-VN")+" đ";
+let me=null, products=[], categories=[], brands=[], editingId=null, imageData=null, toastTimer;
 
-function toast(msg, err) {
-  const t = $("#toast");
-  t.textContent = msg; t.className = "toast show" + (err ? " err" : "");
-  clearTimeout(timer); timer = setTimeout(() => (t.className = "toast"), 2800);
-}
-
-async function api(path, method = "GET", body) {
-  const res = await fetch("/api" + path, {
-    method,
-    headers: { "Content-Type": "application/json", Authorization: "Bearer " + (localStorage.token || "") },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (res.status === 401 && path !== "/login") { logout(); throw new Error(data.message); }
-  if (!res.ok) throw new Error(data.message || "Có lỗi xảy ra.");
+async function api(path,method="GET",body){
+  const res=await fetch("/api"+path,{method,headers:{"Content-Type":"application/json",Authorization:"Bearer "+(localStorage.token||"")},body:body?JSON.stringify(body):undefined});
+  const data=await res.json().catch(()=>({}));
+  if(res.status===401){localStorage.removeItem("token");location.reload();}
+  if(!res.ok)throw new Error(data.message||"Có lỗi xảy ra.");
   return data;
 }
-const run = (fn) => async (...a) => { try { await fn(...a); } catch (e) { toast(e.message, true); } };
+function toast(msg,error=false){const t=$("#toast");t.textContent=msg;t.className="toast show"+(error?" error":"");clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.className="toast",2600);}
+const run=fn=>async(...args)=>{try{await fn(...args)}catch(e){toast(e.message,true)}};
 
-// ---------- Đăng nhập ----------
-$("#loginForm").addEventListener("submit", run(async (e) => {
+$("#loginForm").addEventListener("submit",run(async e=>{
+  e.preventEvent?.();
   e.preventDefault();
-  const r = await api("/login", "POST", { username: $("#lu").value, password: $("#lp").value });
-  localStorage.token = r.token; $("#lp").value = "";
-  start(r.user);
+  const r=await api("/login","POST",{username:$("#username").value,password:$("#password").value});
+  localStorage.token=r.token;start(r.user);
 }));
-// ---------- Đăng ký ----------
-function showAuth(reg) { $("#loginForm").hidden = reg; $("#regForm").hidden = !reg; }
-$("#toReg").onclick = (e) => { e.preventDefault(); showAuth(true); };
-$("#toLogin").onclick = (e) => { e.preventDefault(); showAuth(false); };
-$("#regForm").addEventListener("submit", run(async (e) => {
-  e.preventDefault();
-  if ($("#rp").value !== $("#rp2").value) throw new Error("Mật khẩu nhập lại không khớp.");
-  await api("/register", "POST", { full_name: $("#rf").value, username: $("#ru").value, password: $("#rp").value });
-  $("#lu").value = $("#ru").value; $("#regForm").reset(); showAuth(false);
-  toast("Đăng ký thành công. Hãy đăng nhập.");
-}));
-function logout() { localStorage.removeItem("token"); me = null; cart = []; $("#app").hidden = true; $("#login").hidden = false; }
-$("#logout").onclick = logout;
+$("#logout").onclick=()=>{localStorage.removeItem("token");location.reload()};
 
-function start(user) {
-  me = user;
-  $("#login").hidden = true; $("#app").hidden = false;
-  $("#whoami").textContent = `${user.full_name} (${user.role === "admin" ? "Quản trị" : "Nhân viên"})`;
-  $("#usersPanel").hidden = user.role !== "admin";
-  showTab("dash");
-  loadProducts(); renderCart();
+async function start(user){
+  me=user;$("#login").hidden=true;$("#app").hidden=false;
+  const names={admin:"Quản lý",warehouse:"Quản lý",viewer:"Người dùng (chỉ xem)",staff:"Người dùng (chỉ xem)"};
+  $("#whoami").textContent=`${user.full_name} · ${names[user.role]||user.role}`;
+  const writable=me.role==="admin";
+  document.querySelectorAll(".writeRole").forEach(el=>el.classList.toggle("disabled",!writable));
+  document.querySelectorAll(".writeRole").forEach(el=>el.disabled=!writable);
+  document.querySelectorAll(".adminOnly").forEach(el=>el.hidden=me.role!=="admin");
+  await loadCatalog();
+  document.querySelectorAll(".tabs button").forEach(b=>b.classList.toggle("on",b.dataset.tab==="dashboard"));
+  showTab(me.role==="admin"?"dashboard":"products");
 }
-(async () => { if (localStorage.token) { try { start(await api("/me")); } catch { logout(); } } })();
-
-// ---------- Tabs ----------
-document.querySelectorAll(".tabs button").forEach((b) => (b.onclick = () => showTab(b.dataset.tab)));
-function showTab(name) {
-  document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === name));
-  document.querySelectorAll(".view").forEach((v) => (v.hidden = v.id !== name));
-  if (name === "dash") { loadStats(); if (me.role === "admin") loadUsers(); }
-  else { loadProducts(); loadOrders(); }
+document.querySelectorAll(".tabs button").forEach(b=>b.onclick=()=>showTab(b.dataset.tab));
+async function showTab(name){
+  document.querySelectorAll(".tabs button").forEach(b=>b.classList.toggle("on",b.dataset.tab===name));
+  document.querySelectorAll(".view").forEach(v=>v.hidden=v.id!==name);
+  if(name==="dashboard")loadStats();
+  if(name==="products")loadProducts();
+  if(name==="catalog")loadCatalog();
+  if(name==="inventory")loadInventory();
+  if(name==="users")loadUsers();
 }
+(async()=>{if(localStorage.token){try{start(await api("/me"))}catch{localStorage.removeItem("token");$("#login").hidden=false}}})();
 
-// ---------- Dashboard ----------
-const loadStats = run(async () => {
-  const s = await api("/stats");
-  $("#stats").innerHTML = `
-    <div class="stat main"><span>Tổng doanh thu</span><b>${money(s.revenue)}</b><small>Hôm nay: ${money(s.todayRevenue)}</small></div>
-    <div class="stat"><span>Đơn hàng</span><b>${s.orders}</b></div>
-    <div class="stat"><span>Loại sản phẩm</span><b>${s.products}</b></div>
-    <div class="stat"><span>Tổng tồn kho</span><b>${s.stock}</b></div>`;
-  const max = Math.max(...s.last7days.map((d) => d.total), 1);
-  $("#bars").innerHTML = s.last7days.map((d) =>
-    `<div class="bar"><em>${d.total ? Math.round(d.total / 1000) + "k" : ""}</em><i style="height:${(d.total / max) * 85}%"></i>${d.label}</div>`).join("");
-  $("#top").innerHTML = s.topProducts.length
-    ? s.topProducts.map((p) => `<li>${esc(p.name)}<span class="r">${p.sold} đã bán</span></li>`).join("")
-    : '<div class="empty">Chưa có đơn hàng nào.</div>';
-  $("#low").innerHTML = s.lowStock.length
-    ? s.lowStock.map((p) => `<li>${esc(p.name)} <span class="code">${esc(p.product_code)}</span><span class="r low">còn ${p.quantity}</span></li>`).join("")
-    : '<div class="empty">Tất cả sản phẩm đều đủ hàng.</div>';
+const loadStats=run(async()=>{
+  const s=await api("/stats");
+  $("#stats").innerHTML=`<div class="stat"><span>Tổng sản phẩm</span><b>${s.products}</b></div><div class="stat"><span>Số lượng tồn</span><b>${s.stock}</b></div><div class="stat"><span>Giá trị tồn kho</span><b>${money(s.stockValue)}</b></div><div class="stat warning"><span>Sắp hết hàng</span><b>${s.lowStock.length}</b></div>`;
+  const max=Math.max(...s.chart.flatMap(d=>[d.incoming,d.outgoing]),1);
+  $("#chart").innerHTML=s.chart.map(d=>`<div class="chartGroup"><i class="in" style="height:${d.incoming/max*160}px"></i><i class="out" style="height:${d.outgoing/max*160}px"></i><small>${d.label}</small></div>`).join("");
+  $("#lowStock").innerHTML=s.lowStock.length?s.lowStock.map(p=>`<div class="listRow"><span>${esc(p.name)}<small>${esc(p.product_code)}</small></span><b class="low">Còn ${p.quantity}</b></div>`).join(""):"<div class='empty'>Không có sản phẩm sắp hết.</div>";
 });
 
-// ---------- Quản lý tài khoản ----------
-const loadUsers = run(async () => {
-  const rows = await api("/users");
-  $("#users").innerHTML = rows.map((u) => `<tr>
-    <td>${u.id}</td><td>${esc(u.username)}</td><td>${esc(u.full_name)}</td>
-    <td>${u.id === me.id ? (u.role === "admin" ? "Quản trị viên" : "Nhân viên") :
-      `<select data-role="${u.id}"><option value="staff" ${u.role === "staff" ? "selected" : ""}>Nhân viên</option><option value="admin" ${u.role === "admin" ? "selected" : ""}>Quản trị viên</option></select>`}</td>
-    <td>${esc(u.created_at)}</td>
-    <td class="act"><button class="btn ghost sm" data-pw="${u.id}">Đặt lại mật khẩu</button>${u.id === me.id ? "" : `<button class="btn ghost sm danger" data-deluser="${u.id}">Xóa</button>`}</td></tr>`).join("");
+async function loadCatalog(){
+  [categories,brands]=await Promise.all([api("/categories"),api("/brands")]);
+  $("#categoryFilter").innerHTML='<option value="">Tất cả danh mục</option>'+categories.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join("");
+  $("#brandFilter").innerHTML='<option value="">Tất cả thương hiệu</option>'+brands.map(b=>`<option value="${b.id}">${esc(b.name)}</option>`).join("");
+  $("#productCategory").innerHTML='<option value="">Không có</option>'+categories.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join("");
+  $("#productBrand").innerHTML='<option value="">Không có</option>'+brands.map(b=>`<option value="${b.id}">${esc(b.name)}</option>`).join("");
+  $("#categories").innerHTML=categories.map(c=>`<div class="listRow"><span>${esc(c.name)}</span>${me.role==="admin"?`<button class="btn ghost sm danger" data-delete-category="${c.id}">Xóa</button>`:""}</div>`).join("");
+  $("#brands").innerHTML=brands.map(b=>`<div class="listRow"><span>${esc(b.name)}</span>${me.role==="admin"?`<button class="btn ghost sm danger" data-delete-brand="${b.id}">Xóa</button>`:""}</div>`).join("");
+  $("#movementProduct").innerHTML=products.map(p=>`<option value="${p.id}">${esc(p.name)} (${p.quantity})</option>`).join("");
+}
+const loadCatalogRun=run(loadCatalog); $("#catalog").addEventListener("click",run(async e=>{const b=e.target.closest("button");if(!b)return;if(b.dataset.deleteCategory){await api("/categories/"+b.dataset.deleteCategory,"DELETE");toast("Đã xóa danh mục");loadCatalogRun()}if(b.dataset.deleteBrand){await api("/brands/"+b.dataset.deleteBrand,"DELETE");toast("Đã xóa thương hiệu");loadCatalogRun()}}));
+$("#addCategory").onclick=run(async()=>{const name=prompt("Tên danh mục");if(name){await api("/categories","POST",{name});loadCatalog();toast("Đã thêm danh mục")}});
+$("#addBrand").onclick=run(async()=>{const name=prompt("Tên thương hiệu");if(name){await api("/brands","POST",{name});loadCatalog();toast("Đã thêm thương hiệu")}});
+
+let productTimer;
+const loadProducts=run(async()=>{
+  const q=new URLSearchParams({search:$("#productSearch").value.trim(),category:$("#categoryFilter").value,brand:$("#brandFilter").value,status:$("#statusFilter").value,sort:$("#sortFilter").value});
+  products=await api("/products?"+q);
+  const costColumn=me.role==="admin"?'<th class="r">Giá nhập</th>':"";
+  const brandColumn=me.role==="admin"?'<th>Thương hiệu</th>':"";
+  const thead=$("#productRows").parentElement.querySelector("thead tr");
+  thead.innerHTML='<th>Ảnh</th><th>SKU</th><th>Tên</th><th>Danh mục</th>'+brandColumn+costColumn+'<th class="r">Giá bán</th><th class="r">Tồn</th><th>Trạng thái</th><th></th>';
+  $("#productRows").innerHTML=products.length?products.map(p=>{
+    const cost=me.role==="admin"?`<td class="r">${money(p.cost_price)}</td>`:"";
+    const brand=me.role==="admin"?`<td>${esc(p.brand_name||"-")}</td>`:"";
+    const actions=me.role==="admin"?`<button class="btn ghost sm" data-edit="${p.id}">Sửa</button><button class="btn ghost sm danger" data-delete="${p.id}">Xóa</button>`:"";
+    return `<tr><td>${p.image?`<img class="thumb" src="${esc(p.image)}">`:"<span class='thumb'></span>"}</td><td>${esc(p.sku||p.product_code)}</td><td><b>${esc(p.name)}</b></td><td>${esc(p.category_name||"-")}</td>${brand}${cost}<td class="r">${money(p.price)}</td><td class="r ${p.quantity<=p.low_stock_threshold?"low":""}">${p.quantity}</td><td><span class="status ${p.status}">${p.status==="inactive"?"Ngừng bán":"Đang bán"}</span></td><td class="act">${actions}</td></tr>`;
+  }).join(""):`<tr><td colspan='${me.role==="admin"?10:7}' class='empty'>Không tìm thấy sản phẩm</td></tr>`;
+  $("#movementProduct").innerHTML=products.map(p=>`<option value="${p.id}">${esc(p.name)} (${p.quantity})</option>`).join("");
 });
-$("#users").addEventListener("change", run(async (e) => {
-  if (!e.target.dataset.role) return;
-  await api("/users/" + e.target.dataset.role, "PUT", { role: e.target.value }); toast("Đã đổi quyền.");
-}));
-$("#users").addEventListener("click", run(async (e) => {
-  const b = e.target.closest("button"); if (!b) return;
-  if (b.dataset.pw) {
-    const p = prompt("Nhập mật khẩu mới (từ 6 ký tự):"); if (!p) return;
-    await api("/users/" + b.dataset.pw, "PUT", { password: p }); toast("Đã đặt lại mật khẩu.");
+["productSearch","categoryFilter","brandFilter","statusFilter","sortFilter"].forEach(id=>$("#"+id).addEventListener(id==="productSearch"?"input":"change",()=>{clearTimeout(productTimer);productTimer=setTimeout(loadProducts,250)}));
+$("#addProduct").onclick=()=>openProduct(null);
+function openProduct(p){
+  editingId=p?.id||null;imageData=p?.image||null;$("#productTitle").textContent=p?"Sửa sản phẩm":"Thêm sản phẩm";
+  $("#sku").value=p?.sku||p?.product_code||"";$("#productName").value=p?.name||"";$("#productCategory").value=p?.category_id||"";$("#productBrand").value=p?.brand_id||"";$("#costPrice").value=p?.cost_price||0;$("#sellingPrice").value=p?.price||"";$("#quantity").value=p?.quantity||0;$("#threshold").value=p?.low_stock_threshold||5;$("#productStatus").value=p?.status||"active";$("#imagePreview").src=imageData||"";
+  $("#productDialog").showModal();
+}
+$("#imageInput").onchange=e=>{const f=e.target.files[0];if(!f)return;const img=new Image();img.onload=()=>{const k=Math.min(1,480/Math.max(img.width,img.height));const c=document.createElement("canvas");c.width=img.width*k;c.height=img.height*k;c.getContext("2d").drawImage(img,0,0,c.width,c.height);imageData=c.toDataURL("image/jpeg",.8);$("#imagePreview").src=imageData};img.src=URL.createObjectURL(f)};
+$("#closeProduct").onclick=()=>$("#productDialog").close();
+$("#productForm").onsubmit=run(async e=>{e.preventDefault();const b={sku:$("#sku").value,product_code:$("#sku").value,name:$("#productName").value,category_id:Number($("#productCategory").value)||null,brand_id:Number($("#productBrand").value)||null,image:imageData,cost_price:Number($("#costPrice").value),price:Number($("#sellingPrice").value),quantity:Number($("#quantity").value),low_stock_threshold:Number($("#threshold").value),status:$("#productStatus").value};await api(editingId?"/products/"+editingId:"/products",editingId?"PUT":"POST",b);$("#productDialog").close();toast("Đã lưu sản phẩm");loadProducts();loadStats()});
+$("#productRows").addEventListener("click",run(async e=>{const b=e.target.closest("button");if(!b)return;if(b.dataset.edit)openProduct(products.find(p=>p.id==b.dataset.edit));if(b.dataset.delete&&confirm("Xóa sản phẩm này?")){await api("/products/"+b.dataset.delete,"DELETE");toast("Đã xóa sản phẩm");loadProducts();loadStats()}}));
+
+$("#importBtn").onclick=()=>$("#importFile").click();
+$("#importFile").onchange=run(async e=>{const f=e.target.files[0];if(!f)return;const base64=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result.split(",")[1]);r.onerror=reject;r.readAsDataURL(f)});const r=await api("/products/import","POST",{base64});toast(r.message);loadProducts()});
+
+const loadInventory=run(async()=>{
+  const rows=await api("/inventory/movements");
+  $("#movementRows").innerHTML=rows.map(r=>`<tr><td>${esc(r.created_at)}</td><td>${esc(r.product_name)} <small>${esc(r.product_code)}</small></td><td><span class="status ${r.type==="in"?"active":"inactive"}">${r.type==="in"?"Nhập":"Xuất"}</span></td><td class="r">${r.quantity}</td><td>${esc(r.user_name||"-")}</td><td>${esc(r.note||"-")}</td></tr>`).join("")||"<tr><td colspan='6' class='empty'>Chưa có lịch sử</td></tr>";
+});
+$("#movementSubmit").onclick=run(async()=>{
+  const r=await api("/inventory/movement","POST",{product_id:Number($("#movementProduct").value),type:$("#movementType").value,quantity:Number($("#movementQty").value),note:$("#movementNote").value});toast(r.message);$("#movementNote").value="";loadProducts();loadInventory();loadStats();
+});
+
+const loadUsers=run(async()=>{$("#userRows").innerHTML=(await api("/users")).map(u=>{
+  const role=u.role==="admin"?"Quản lý":"Người dùng (chỉ xem)";
+  const actions=u.id===me.id&&u.account_type==="admin"?"":`<button class="btn ghost sm" data-role="${u.id}" data-account="${u.account_type}" data-current="${esc(u.role)}">Đổi quyền</button><button class="btn ghost sm danger" data-lock="${u.id}" data-account="${u.account_type}" data-locked="${u.is_locked?1:0}">${u.is_locked?"Mở khóa":"Khóa"}</button>`;
+  return `<tr><td>${u.id}</td><td>${esc(u.username)}</td><td>${esc(u.full_name)}</td><td>${role}</td><td>${u.is_locked?"Đã khóa":"Đang hoạt động"}</td><td>${actions}</td></tr>`;
+}).join("")});
+$("#addUser").onclick=()=>$("#userDialog").showModal();$("#closeUser").onclick=()=>$("#userDialog").close();
+$("#userForm").onsubmit=run(async e=>{e.preventDefault();await api("/users","POST",{username:$("#newUsername").value,full_name:$("#newFullName").value,password:$("#newPassword").value,role:$("#newRole").value});$("#userDialog").close();toast("Đã tạo tài khoản");loadUsers()});
+$("#userRows").addEventListener("click",run(async e=>{
+  const b=e.target.closest("button[data-role]");
+  if(b){
+  const role=prompt("Nhập quyền mới: admin hoặc viewer",b.dataset.current||"viewer");
+  if(!["admin","viewer"].includes(role||""))return toast("Quyền không hợp lệ.",true);
+  await api("/users/"+b.dataset.role,"PUT",{role,account_type:b.dataset.account});
+  toast("Đã đổi quyền.");loadUsers();
   }
-  if (b.dataset.deluser && confirm("Xóa tài khoản này?")) { await api("/users/" + b.dataset.deluser, "DELETE"); toast("Đã xóa tài khoản."); loadUsers(); }
-}));
-$("#addUser").onclick = () => { $("#uform").reset(); $("#udlg").showModal(); };
-$("#uform").addEventListener("submit", run(async (e) => {
-  if (e.submitter?.hasAttribute("data-close")) return;
-  await api("/users", "POST", { username: $("#uname").value, full_name: $("#ufull").value, password: $("#upass").value, role: $("#urole").value });
-  $("#udlg").close(); toast("Đã tạo tài khoản."); loadUsers();
-}));
-document.querySelectorAll("[data-close]").forEach((b) => (b.onclick = () => b.closest("dialog").close()));
-
-// ---------- Sản phẩm ----------
-const loadProducts = run(async () => {
-  productsCache = await api("/products?search=" + encodeURIComponent($("#search").value.trim()));
-  renderProducts();
-});
-function renderProducts() {
-  $("#products").innerHTML = productsCache.length ? productsCache.map((p) => `<tr>
-    <td>${p.id}</td>
-    <td>${p.image ? `<img class="thumb" src="${p.image}" alt="">` : '<span class="thumb"></span>'}</td>
-    <td>${esc(p.name)}<div class="code">${esc(p.product_code)}</div></td>
-    <td class="r">${money(p.price)}</td>
-    <td class="r ${p.quantity <= 5 ? "low" : ""}">${p.quantity}</td>
-    <td>${esc(p.import_date)}</td>
-    <td class="act">
-      <button class="btn sm" data-add="${p.id}" ${p.quantity ? "" : "disabled"}>Thêm vào giỏ</button>
-      <button class="btn ghost sm" data-edit="${p.id}">Sửa</button>
-      ${me.role === "admin" ? `<button class="btn ghost sm danger" data-del="${p.id}">Xóa</button>` : ""}
-    </td></tr>`).join("") : '<tr><td colspan="7" class="empty">Không tìm thấy sản phẩm. Bấm "Thêm sản phẩm" để tạo mới.</td></tr>';
-}
-let st; $("#search").addEventListener("input", () => { clearTimeout(st); st = setTimeout(loadProducts, 250); });
-
-$("#products").addEventListener("click", run(async (e) => {
-  const b = e.target.closest("button"); if (!b) return;
-  if (b.dataset.add) addToCart(Number(b.dataset.add));
-  if (b.dataset.edit) openProduct(productsCache.find((p) => p.id == b.dataset.edit));
-  if (b.dataset.del && confirm("Xóa sản phẩm này?")) {
-    await api("/products/" + b.dataset.del, "DELETE"); toast("Đã xóa sản phẩm.");
-    cart = cart.filter((c) => c.id != b.dataset.del); renderCart(); loadProducts();
+  const lock=e.target.closest("button[data-lock]");
+  if(lock){
+    await api("/users/"+lock.dataset.lock,"PUT",{is_locked:lock.dataset.locked==="0",account_type:lock.dataset.account});
+    toast(lock.dataset.locked==="0"?"Đã khóa tài khoản":"Đã mở khóa tài khoản");loadUsers();
   }
 }));
-
-function openProduct(p) {
-  editingId = p ? p.id : null; pimage = p?.image || null;
-  $("#ptitle").textContent = p ? "Sửa sản phẩm" : "Thêm sản phẩm";
-  $("#pcode").value = p?.product_code || ""; $("#pname").value = p?.name || "";
-  $("#pprice").value = p?.price || ""; $("#pqty").value = p?.quantity ?? "";
-  $("#pdate").value = p?.import_date || new Date().toLocaleDateString("sv-SE");
-  $("#pimgPrev").src = pimage || "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
-  $("#pdlg").showModal();
-}
-$("#addProduct").onclick = () => openProduct(null);
-
-// Thu nhỏ ảnh trước khi gửi lên server (giới hạn ~1.5MB)
-$("#pimg").addEventListener("change", (e) => {
-  const f = e.target.files[0]; if (!f) return;
-  const img = new Image();
-  img.onload = () => {
-    const k = Math.min(1, 480 / Math.max(img.width, img.height));
-    const c = document.createElement("canvas");
-    c.width = img.width * k; c.height = img.height * k;
-    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-    pimage = c.toDataURL("image/jpeg", 0.8); $("#pimgPrev").src = pimage;
-  };
-  img.src = URL.createObjectURL(f);
-});
-
-$("#pform").addEventListener("submit", run(async (e) => {
-  if (e.submitter?.hasAttribute("data-close")) return;
-  const body = { product_code: $("#pcode").value, name: $("#pname").value, price: $("#pprice").value,
-    quantity: $("#pqty").value, import_date: $("#pdate").value, image: pimage };
-  const r = editingId ? await api("/products/" + editingId, "PUT", body) : await api("/products", "POST", body);
-  $("#pdlg").close(); toast(r.message);
-  cart = cart.filter((c) => c.id !== editingId); renderCart(); loadProducts();
-}));
-
-// ---------- Giỏ hàng & đơn hàng ----------
-function addToCart(id) {
-  const p = productsCache.find((x) => x.id === id); if (!p) return;
-  const c = cart.find((x) => x.id === id);
-  if (c) { if (c.qty >= p.quantity) return toast(`Chỉ còn ${p.quantity} sản phẩm trong kho.`, true); c.qty++; }
-  else cart.push({ id, name: p.name, price: p.price, qty: 1, max: p.quantity });
-  renderCart();
-}
-function renderCart() {
-  $("#cartItems").innerHTML = cart.length ? cart.map((c) => `<div class="item">
-    <div>${esc(c.name)}<div class="qty"><button data-dec="${c.id}" aria-label="Giảm">−</button>${c.qty}<button data-inc="${c.id}" aria-label="Tăng">+</button></div></div>
-    <div class="r">${money(c.price * c.qty)}<br><button class="btn ghost sm danger" data-rm="${c.id}">Bỏ</button></div></div>`).join("")
-    : '<div class="empty">Chưa có sản phẩm. Bấm "Thêm vào giỏ" ở danh sách.</div>';
-  $("#cartTotal").textContent = money(cart.reduce((s, c) => s + c.price * c.qty, 0));
-  $("#buy").disabled = !cart.length;
-}
-$("#cartItems").addEventListener("click", (e) => {
-  const b = e.target.closest("button"); if (!b) return;
-  const id = Number(b.dataset.inc || b.dataset.dec || b.dataset.rm), c = cart.find((x) => x.id === id);
-  if (b.dataset.inc) { if (c.qty >= c.max) return toast(`Chỉ còn ${c.max} sản phẩm trong kho.`, true); c.qty++; }
-  if (b.dataset.dec && --c.qty <= 0) cart = cart.filter((x) => x.id !== id);
-  if (b.dataset.rm) cart = cart.filter((x) => x.id !== id);
-  renderCart();
-});
-$("#buy").onclick = run(async () => {
-  const r = await api("/orders", "POST", { customer_name: $("#customer").value, items: cart.map((c) => ({ product_id: c.id, quantity: c.qty })) });
-  toast(`Mua hàng thành công. Đơn #${r.id}: ${money(r.total)}`);
-  cart = []; $("#customer").value = ""; renderCart(); loadProducts(); loadOrders();
-});
-
-const loadOrders = run(async () => {
-  const rows = await api("/orders");
-  $("#orders").innerHTML = rows.length ? rows.map((o) => `<tr>
-    <td>#${o.id}</td><td>${esc(o.created_at)}</td><td>${esc(o.customer_name)}</td>
-    <td>${o.items.map((i) => `${esc(i.product_name)} × ${i.quantity}`).join("<br>")}</td>
-    <td>${esc(o.seller_name)}</td><td class="r"><b>${money(o.total)}</b></td></tr>`).join("")
-    : '<tr><td colspan="6" class="empty">Chưa có đơn hàng nào.</td></tr>';
-});
-renderCart();
