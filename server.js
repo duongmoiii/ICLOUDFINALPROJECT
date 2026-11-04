@@ -1,9 +1,8 @@
-require("dotenv").config();
-const dns = require("node:dns");
 
-dns.setServers(["8.8.8.8", "1.1.1.1"]);
+require("dotenv").config();
+
 const express = require("express");
-const { MongoClient } = require("mongodb");
+const mysql = require("mysql2/promise");
 const path = require("path");
 const crypto = require("node:crypto");
 
@@ -14,274 +13,319 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, "public")));
 
-const uri = process.env.MONGODB_URI;
-const databaseName = process.env.MONGODB_DATABASE || "product_app";
-
-if (!uri) {
-  throw new Error("Thiếu biến môi trường MONGODB_URI trong file .env");
-}
-
-const client = new MongoClient(uri, {
-  serverSelectionTimeoutMS: 10000,
+// Kết nối Railway MySQL
+const pool = mysql.createPool({
+  host: process.env.MYSQLHOST,
+  port: Number(process.env.MYSQLPORT || 3306),
+  user: process.env.MYSQLUSER,
+  password: process.env.MYSQLPASSWORD,
+  database: process.env.MYSQLDATABASE,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+  decimalNumbers: true
 });
 
-let db;
-let products;
-let users;
-let counters;
-
-// Helper: wrap async route handlers
+// Xử lý lỗi async
 function wrap(fn) {
   return function (req, res, next) {
-    fn(req, res, next).catch((err) => {
+    Promise.resolve(fn(req, res, next)).catch((err) => {
       const status = err.status || 500;
-      res.status(status).json({ message: err.message || "Lỗi server." });
+
+      if (status >= 500) {
+        console.error("API error:", err.code || err.message);
+      }
+
+      res.status(status).json({
+        message: err.message || "Lỗi server."
+      });
     });
   };
 }
 
-// Helper: throw HTTP error
 function httpError(status, message) {
   const err = new Error(message);
   err.status = status;
   return err;
 }
 
-// Helper: next sequential ID
-async function nextId(name) {
-  const result = await counters.findOneAndUpdate(
-    { _id: name },
-    { $inc: { seq: 1 } },
-    { upsert: true, returnDocument: "after" }
-  );
-  return result.seq || result.value?.seq || 1;
-}
-
-// Helper: hash password using Node.js crypto (PBKDF2)
+// Mã hóa mật khẩu bằng PBKDF2
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString("hex");
-  const hash = crypto.pbkdf2Sync(password, salt, 10000, 64, "sha512").toString("hex");
+
+  const hash = crypto.pbkdf2Sync(
+    password,
+    salt,
+    10000,
+    64,
+    "sha512"
+  ).toString("hex");
+
   return `${salt}:${hash}`;
 }
 
-// Helper: verify password
+// Kiểm tra mật khẩu
 function verifyPassword(password, stored) {
   if (!stored) return false;
+
   const [salt, originalHash] = stored.split(":");
+
   if (!salt || !originalHash) return false;
-  const hash = crypto.pbkdf2Sync(password, salt, 10000, 64, "sha512").toString("hex");
-  return hash === originalHash;
+
+  const hash = crypto.pbkdf2Sync(
+    password,
+    salt,
+    10000,
+    64,
+    "sha512"
+  ).toString("hex");
+
+  const original = Buffer.from(originalHash, "hex");
+  const current = Buffer.from(hash, "hex");
+
+  return original.length === current.length &&
+    crypto.timingSafeEqual(original, current);
 }
 
-// Simple in-memory active tokens (or base64 encoded JSON tokens for simplicity)
+// Token đăng nhập trong bộ nhớ
 const activeTokens = new Map();
 
 function generateToken(user) {
   const token = crypto.randomBytes(32).toString("hex");
-  activeTokens.set(token, { id: user.id, username: user.username, role: user.role });
+
+  activeTokens.set(token, {
+    id: user.id,
+    username: user.username,
+    role: user.role
+  });
+
   return token;
 }
 
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+
+  const token = authHeader.startsWith("Bearer ")
+    ? authHeader.slice(7)
+    : null;
+
   if (!token || !activeTokens.has(token)) {
-    return res.status(401).json({ message: "Chưa đăng nhập hoặc token hết hạn." });
+    return res.status(401).json({
+      message: "Chưa đăng nhập hoặc token hết hạn."
+    });
   }
+
   req.user = activeTokens.get(token);
   next();
 }
 
-// Chuyển chuỗi thành regex an toàn để tìm kiếm
-function escapeRegex(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+// Kiểm tra kết nối database
+app.get("/api/health", wrap(async (req, res) => {
+  await pool.query("SELECT 1");
 
-// Kiểm tra kết nối MongoDB
-app.get("/api/health", async (req, res) => {
-  try {
-    await db.command({ ping: 1 });
+  res.json({
+    status: "ok",
+    database: "connected"
+  });
+}));
 
-    res.json({
-      status: "ok",
-      database: "connected",
-    });
-  } catch (error) {
-    console.error("Health check failed:", error.message);
+// Danh sách và tìm kiếm sản phẩm
+app.get("/api/products", wrap(async (req, res) => {
+  const keyword = String(req.query.search || "").trim();
 
-    res.status(503).json({
-      status: "error",
-      database: "unavailable",
-    });
+  let sql = `
+    SELECT
+      id,
+      product_code,
+      name,
+      price,
+      quantity,
+      created_at
+    FROM products
+  `;
+
+  const params = [];
+
+  if (keyword) {
+    sql += `
+      WHERE product_code LIKE ?
+      OR name LIKE ?
+    `;
+
+    const search = `%${keyword}%`;
+    params.push(search, search);
   }
-});
 
-// Lấy danh sách hoặc tìm kiếm sản phẩm
-app.get("/api/products", async (req, res) => {
-  try {
-    const keyword = String(req.query.search || "").trim();
-    const filter = {};
+  sql += " ORDER BY id DESC";
 
-    if (keyword) {
-      const pattern = escapeRegex(keyword);
+  const [rows] = await pool.execute(sql, params);
 
-      filter.$or = [
-        {
-          product_code: {
-            $regex: pattern,
-            $options: "i",
-          },
-        },
-        {
-          name: {
-            $regex: pattern,
-            $options: "i",
-          },
-        },
-      ];
-    }
-
-    const rows = await products
-      .find(filter)
-      .sort({ _id: -1 })
-      .toArray();
-
-    // Giữ trường id để tương thích với frontend cũ
-    res.json(
-      rows.map(({ _id, ...item }) => ({
-        ...item,
-        id: _id.toString(),
-      }))
-    );
-  } catch (error) {
-    console.error("Product search failed:", error.message);
-
-    res.status(500).json({
-      message: "Không thể tải sản phẩm.",
-    });
-  }
-});
+  res.json(rows);
+}));
 
 // Thêm sản phẩm
-app.post("/api/products", async (req, res) => {
+app.post("/api/products", wrap(async (req, res) => {
+  const { product_code, name, price, quantity } = req.body;
+
+  const code = String(product_code || "").trim();
+  const productName = String(name || "").trim();
+  const productPrice = Number(price);
+  const productQuantity = Number(quantity);
+
+  if (
+    !code ||
+    !productName ||
+    !Number.isFinite(productPrice) ||
+    productPrice <= 0 ||
+    !Number.isInteger(productQuantity) ||
+    productQuantity < 0
+  ) {
+    throw httpError(
+      400,
+      "Vui lòng nhập mã, tên, giá hợp lệ và số lượng không âm."
+    );
+  }
+
   try {
-    const { product_code, name, price, quantity } = req.body;
-
-    const code = String(product_code || "").trim();
-    const productName = String(name || "").trim();
-    const productPrice = Number(price);
-    const productQuantity = Number(quantity);
-
-    if (
-      !code ||
-      !productName ||
-      !Number.isFinite(productPrice) ||
-      productPrice <= 0 ||
-      !Number.isInteger(productQuantity) ||
-      productQuantity < 0
-    ) {
-      return res.status(400).json({
-        message:
-          "Vui lòng nhập mã, tên, giá hợp lệ và số lượng không âm.",
-      });
-    }
-
-    const result = await products.insertOne({
-      product_code: code,
-      name: productName,
-      price: productPrice,
-      quantity: productQuantity,
-      created_at: new Date(),
-    });
+    const [result] = await pool.execute(
+      `INSERT INTO products
+       (product_code, name, price, quantity)
+       VALUES (?, ?, ?, ?)`,
+      [code, productName, productPrice, productQuantity]
+    );
 
     res.status(201).json({
       message: "Thêm sản phẩm thành công.",
-      id: result.insertedId.toString(),
+      id: result.insertId
     });
   } catch (error) {
-    if (error.code === 11000) {
-      return res.status(409).json({
-        message: "Mã sản phẩm đã tồn tại.",
-      });
+    if (error.code === "ER_DUP_ENTRY") {
+      throw httpError(409, "Mã sản phẩm đã tồn tại.");
     }
 
-    console.error("Product insert failed:", error.message);
-
-    res.status(500).json({
-      message: "Không thể thêm sản phẩm.",
-    });
+    throw error;
   }
-});
+}));
 
-// Đăng ký người dùng
+// Đăng ký tài khoản
 app.post("/api/register", wrap(async (req, res) => {
-  const username = String(req.body.username || "").trim().slice(0, 50);
-  const fullName = String(req.body.full_name || "").trim().slice(0, 100);
+  const username = String(req.body.username || "")
+    .trim()
+    .slice(0, 50);
+
+  const fullName = String(req.body.full_name || "")
+    .trim()
+    .slice(0, 100);
+
   const password = String(req.body.password || "");
+
   if (!username || !fullName || password.length < 6) {
-    throw httpError(400, "Nhập đủ họ tên, tên đăng nhập và mật khẩu từ 6 ký tự.");
+    throw httpError(
+      400,
+      "Nhập đủ họ tên, tên đăng nhập và mật khẩu từ 6 ký tự."
+    );
   }
-  if (await users.findOne({ username })) {
-    throw httpError(409, "Tên đăng nhập đã tồn tại.");
+
+  const passwordHash = hashPassword(password);
+
+  try {
+    await pool.execute(
+      `INSERT INTO users
+       (username, full_name, password_hash, role)
+       VALUES (?, ?, ?, ?)`,
+      [username, fullName, passwordHash, "staff"]
+    );
+
+    res.status(201).json({
+      message: "Đăng ký thành công."
+    });
+  } catch (error) {
+    if (error.code === "ER_DUP_ENTRY") {
+      throw httpError(409, "Tên đăng nhập đã tồn tại.");
+    }
+
+    throw error;
   }
-  const userDoc = {
-    id: await nextId("users"),
-    username,
-    full_name: fullName,
-    password_hash: hashPassword(password),
-    role: "staff",
-    created_at: new Date(),
-  };
-  await users.insertOne(userDoc);
-  res.status(201).json({ message: "Đăng ký thành công." });
 }));
 
 // Đăng nhập
 app.post("/api/login", wrap(async (req, res) => {
   const username = String(req.body.username || "").trim();
   const password = String(req.body.password || "");
-  const user = await users.findOne({ username });
+
+  const [rows] = await pool.execute(
+    `SELECT id, username, full_name, password_hash, role
+     FROM users
+     WHERE username = ?`,
+    [username]
+  );
+
+  const user = rows[0];
+
   if (!user || !verifyPassword(password, user.password_hash)) {
     throw httpError(401, "Sai tên đăng nhập hoặc mật khẩu.");
   }
+
   const token = generateToken(user);
+
   res.json({
     token,
     user: {
       id: user.id,
       username: user.username,
       full_name: user.full_name,
-      role: user.role,
-    },
+      role: user.role
+    }
   });
 }));
 
-// Lấy thông tin user hiện tại
+// Thông tin người dùng hiện tại
 app.get("/api/me", authMiddleware, wrap(async (req, res) => {
-  const user = await users.findOne({ id: req.user.id });
-  if (!user) throw httpError(404, "Không tìm thấy người dùng.");
-  res.json({
-    id: user.id,
-    username: user.username,
-    full_name: user.full_name,
-    role: user.role,
-  });
+  const [rows] = await pool.execute(
+    `SELECT id, username, full_name, role
+     FROM users
+     WHERE id = ?`,
+    [req.user.id]
+  );
+
+  const user = rows[0];
+
+  if (!user) {
+    throw httpError(404, "Không tìm thấy người dùng.");
+  }
+
+  res.json(user);
 }));
 
 // Thống kê dashboard
 app.get("/api/stats", authMiddleware, wrap(async (req, res) => {
-  const allProducts = await products.find({}).toArray();
-  const totalStock = allProducts.reduce((sum, p) => sum + Number(p.quantity || 0), 0);
-  const lowStock = allProducts.filter((p) => Number(p.quantity || 0) < 5);
+  const [rows] = await pool.execute(`
+    SELECT
+      COUNT(*) AS total_products,
+      COALESCE(SUM(quantity), 0) AS total_stock
+    FROM products
+  `);
 
-  // Generate 7 days labels
+  const [lowStock] = await pool.execute(`
+    SELECT id, product_code, name, price, quantity, created_at
+    FROM products
+    WHERE quantity < 5
+    ORDER BY quantity ASC
+  `);
+
   const last7days = [];
+
   for (let i = 6; i >= 0; i--) {
     const d = new Date();
     d.setDate(d.getDate() - i);
+
     last7days.push({
-      label: d.toLocaleDateString("vi-VN", { weekday: "short", day: "numeric", month: "numeric" }),
-      total: 0,
+      label: d.toLocaleDateString("vi-VN", {
+        weekday: "short",
+        day: "numeric",
+        month: "numeric"
+      }),
+      total: 0
     });
   }
 
@@ -289,107 +333,201 @@ app.get("/api/stats", authMiddleware, wrap(async (req, res) => {
     revenue: 0,
     todayRevenue: 0,
     orders: 0,
-    products: allProducts.length,
-    stock: totalStock,
+    products: Number(rows[0].total_products),
+    stock: Number(rows[0].total_stock),
     last7days,
     topProducts: [],
-    lowStock: lowStock.map(({ _id, ...p }) => ({ ...p, id: _id.toString() })),
+    lowStock
   });
 }));
 
-// Quản lý users (admin)
+// Danh sách tài khoản - chỉ admin
 app.get("/api/users", authMiddleware, wrap(async (req, res) => {
-  if (req.user.role !== "admin") throw httpError(403, "Không có quyền.");
-  const allUsers = await users.find({}, { projection: { password_hash: 0 } }).toArray();
-  res.json(allUsers.map(({ _id, ...u }) => ({ ...u, id: u.id || _id.toString() })));
+  if (req.user.role !== "admin") {
+    throw httpError(403, "Không có quyền.");
+  }
+
+  const [rows] = await pool.execute(`
+    SELECT id, username, full_name, role, created_at
+    FROM users
+    ORDER BY id DESC
+  `);
+
+  res.json(rows);
 }));
 
+// Admin tạo tài khoản
 app.post("/api/users", authMiddleware, wrap(async (req, res) => {
-  if (req.user.role !== "admin") throw httpError(403, "Không có quyền.");
-  const { username, full_name, password, role } = req.body;
-  if (!username || !full_name || !password) throw httpError(400, "Thiếu thông tin.");
-  if (await users.findOne({ username })) throw httpError(409, "Tên đăng nhập đã tồn tại.");
-  await users.insertOne({
-    id: await nextId("users"),
-    username: String(username).trim(),
-    full_name: String(full_name).trim(),
-    password_hash: hashPassword(password),
-    role: role === "admin" ? "admin" : "staff",
-    created_at: new Date(),
-  });
-  res.status(201).json({ message: "Tạo tài khoản thành công." });
+  if (req.user.role !== "admin") {
+    throw httpError(403, "Không có quyền.");
+  }
+
+  const username = String(req.body.username || "").trim();
+  const fullName = String(req.body.full_name || "").trim();
+  const password = String(req.body.password || "");
+  const role = req.body.role === "admin" ? "admin" : "staff";
+
+  if (!username || !fullName || password.length < 6) {
+    throw httpError(400, "Thiếu thông tin hoặc mật khẩu quá ngắn.");
+  }
+
+  try {
+    await pool.execute(
+      `INSERT INTO users
+       (username, full_name, password_hash, role)
+       VALUES (?, ?, ?, ?)`,
+      [username, fullName, hashPassword(password), role]
+    );
+
+    res.status(201).json({
+      message: "Tạo tài khoản thành công."
+    });
+  } catch (error) {
+    if (error.code === "ER_DUP_ENTRY") {
+      throw httpError(409, "Tên đăng nhập đã tồn tại.");
+    }
+
+    throw error;
+  }
 }));
 
+// Cập nhật tài khoản
 app.put("/api/users/:id", authMiddleware, wrap(async (req, res) => {
   const targetId = Number(req.params.id);
+
+  if (!Number.isInteger(targetId) || targetId <= 0) {
+    throw httpError(400, "ID không hợp lệ.");
+  }
+
   if (req.user.role !== "admin" && req.user.id !== targetId) {
     throw httpError(403, "Không có quyền.");
   }
+
   const updateData = {};
+
   if (req.body.role && req.user.role === "admin") {
-    updateData.role = req.body.role;
+    updateData.role = req.body.role === "admin" ? "admin" : "staff";
   }
+
   if (req.body.password) {
-    updateData.password_hash = hashPassword(req.body.password);
+    const password = String(req.body.password);
+
+    if (password.length < 6) {
+      throw httpError(400, "Mật khẩu phải có ít nhất 6 ký tự.");
+    }
+
+    updateData.password_hash = hashPassword(password);
   }
-  await users.updateOne({ id: targetId }, { $set: updateData });
-  res.json({ message: "Cập nhật thành công." });
+
+  const fields = [];
+  const values = [];
+
+  for (const [key, value] of Object.entries(updateData)) {
+    fields.push(`${key} = ?`);
+    values.push(value);
+  }
+
+  if (fields.length === 0) {
+    return res.json({
+      message: "Không có thông tin cần cập nhật."
+    });
+  }
+
+  values.push(targetId);
+
+  const [result] = await pool.execute(
+    `UPDATE users SET ${fields.join(", ")} WHERE id = ?`,
+    values
+  );
+
+  if (result.affectedRows === 0) {
+    throw httpError(404, "Không tìm thấy tài khoản.");
+  }
+
+  res.json({
+    message: "Cập nhật thành công."
+  });
 }));
 
+// Xóa tài khoản
 app.delete("/api/users/:id", authMiddleware, wrap(async (req, res) => {
-  if (req.user.role !== "admin") throw httpError(403, "Không có quyền.");
+  if (req.user.role !== "admin") {
+    throw httpError(403, "Không có quyền.");
+  }
+
   const targetId = Number(req.params.id);
-  if (req.user.id === targetId) throw httpError(400, "Không thể tự xóa tài khoản của chính mình.");
-  await users.deleteOne({ id: targetId });
-  res.json({ message: "Đã xóa tài khoản." });
+
+  if (!Number.isInteger(targetId) || targetId <= 0) {
+    throw httpError(400, "ID không hợp lệ.");
+  }
+
+  if (req.user.id === targetId) {
+    throw httpError(
+      400,
+      "Không thể tự xóa tài khoản của chính mình."
+    );
+  }
+
+  const [result] = await pool.execute(
+    "DELETE FROM users WHERE id = ?",
+    [targetId]
+  );
+
+  if (result.affectedRows === 0) {
+    throw httpError(404, "Không tìm thấy tài khoản.");
+  }
+
+  res.json({
+    message: "Đã xóa tài khoản."
+  });
 }));
-// Kết nối MongoDB trước khi mở server
+
+// Tạo bảng MySQL và khởi động server
 async function startServer() {
   try {
-    console.log("Đang kết nối MongoDB...");
-    console.log("Database:", databaseName);
+    console.log("Đang kết nối Railway MySQL...");
 
-    await client.connect();
+    const connection = await pool.getConnection();
 
-    db = client.db(databaseName);
-    products = db.collection("products");
-    users = db.collection("users");
-    counters = db.collection("counters");
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS products (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        product_code VARCHAR(100) NOT NULL UNIQUE,
+        name VARCHAR(255) NOT NULL,
+        price DECIMAL(15,2) NOT NULL,
+        quantity INT NOT NULL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB
+    `);
 
-    await products.createIndex(
-      { product_code: 1 },
-      { unique: true }
-    );
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        username VARCHAR(50) NOT NULL UNIQUE,
+        full_name VARCHAR(100) NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        role VARCHAR(20) NOT NULL DEFAULT 'staff',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB
+    `);
 
-    await users.createIndex(
-      { username: 1 },
-      { unique: true }
-    );
+    connection.release();
 
-    await db.command({ ping: 1 });
+    await pool.query("SELECT 1");
 
-    console.log("MongoDB connected successfully.");
-    console.log("Products collection is ready.");
+    console.log("MySQL connected successfully.");
+    console.log("Products and users tables are ready.");
 
     app.listen(PORT, "0.0.0.0", () => {
       console.log(`Server is running on port ${PORT}`);
     });
+
   } catch (error) {
-    console.error("\nApplication startup failed:");
-    console.error("Error name:", error.name);
+    console.error("Application startup failed:");
     console.error("Error code:", error.code);
     console.error("Error message:", error.message);
 
-    if (error.cause) {
-      console.error("Error cause:", error.cause);
-    }
-
-    if (error.reason) {
-      console.error("Server selection reason:", error.reason);
-    }
-
-    await client.close().catch(() => {});
-    process.exitCode = 1;
+    process.exit(1);
   }
 }
 
