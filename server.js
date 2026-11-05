@@ -325,6 +325,101 @@ app.get("/api/inventory/movements", authMiddleware, requireRoles("admin"), wrap(
   res.json(rows);
 }));
 
+// Tạo đơn hàng và thanh toán
+app.post("/api/checkout", authMiddleware, wrap(async (req, res) => {
+  const items = Array.isArray(req.body.items) ? req.body.items : [];
+  const customerName = String(req.body.customer_name || "").trim().slice(0, 100);
+  const phone = String(req.body.phone || "").trim().slice(0, 20);
+  const address = String(req.body.address || "").trim().slice(0, 255);
+  const paymentMethod = ["cod", "bank", "card"].includes(req.body.payment_method)
+    ? req.body.payment_method
+    : "cod";
+
+  if (!items.length || !customerName || !phone || !address) {
+    throw httpError(400, "Vui lòng nhập đầy đủ thông tin nhận hàng.");
+  }
+
+  const grouped = new Map();
+  for (const item of items) {
+    const productId = Number(item.product_id);
+    const quantity = Number(item.quantity);
+    if (!Number.isInteger(productId) || productId <= 0 || !Number.isInteger(quantity) || quantity <= 0) {
+      throw httpError(400, "Giỏ hàng không hợp lệ.");
+    }
+    grouped.set(productId, (grouped.get(productId) || 0) + quantity);
+  }
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    let total = 0;
+    const orderItems = [];
+    for (const [productId, quantity] of grouped) {
+      const [rows] = await connection.execute(
+        "SELECT id,name,price,quantity,status FROM products WHERE id=? FOR UPDATE",
+        [productId]
+      );
+      const product = rows[0];
+      if (!product || product.status !== "active") throw httpError(409, "Một sản phẩm không còn được bán.");
+      if (product.quantity < quantity) throw httpError(409, `Sản phẩm "${product.name}" không đủ tồn kho.`);
+      const subtotal = Number(product.price) * quantity;
+      total += subtotal;
+      orderItems.push({ productId, quantity, price: Number(product.price) });
+    }
+
+    const orderCode = `DH-${Date.now().toString().slice(-8)}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`;
+    const paymentStatus = paymentMethod === "cod" ? "pending" : "paid";
+    const [orderResult] = await connection.execute(`
+      INSERT INTO orders
+      (user_id,order_code,customer_name,phone,address,payment_method,payment_status,status,total_amount)
+      VALUES (?,?,?,?,?,?,?,?,?)
+    `, [req.user.id, orderCode, customerName, phone, address, paymentMethod, paymentStatus, "pending", total]);
+
+    for (const item of orderItems) {
+      await connection.execute(`
+        INSERT INTO order_items (order_id,product_id,quantity,unit_price)
+        VALUES (?,?,?,?)
+      `, [orderResult.insertId, item.productId, item.quantity, item.price]);
+      await connection.execute(
+        "UPDATE products SET quantity=quantity-? WHERE id=?",
+        [item.quantity, item.productId]
+      );
+      await connection.execute(
+        "INSERT INTO inventory_movements (product_id,type,quantity,note,user_id) VALUES (?,?,?,?,?)",
+        [item.productId, "out", item.quantity, `Bán theo đơn ${orderCode}`, req.user.id]
+      );
+    }
+    await connection.commit();
+    res.status(201).json({ message: "Đặt hàng thành công.", order_code: orderCode, total_amount: total });
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}));
+
+app.get("/api/orders", authMiddleware, wrap(async (req, res) => {
+  const isAdmin = req.user.role === "admin";
+  const [orders] = await pool.execute(
+    isAdmin
+      ? "SELECT * FROM orders ORDER BY created_at DESC LIMIT 300"
+      : "SELECT * FROM orders WHERE user_id=? ORDER BY created_at DESC LIMIT 100",
+    isAdmin ? [] : [req.user.id]
+  );
+  const result = [];
+  for (const order of orders) {
+    const [items] = await pool.execute(`
+      SELECT oi.quantity,oi.unit_price AS price,p.name
+      FROM order_items oi
+      JOIN products p ON p.id=oi.product_id
+      WHERE oi.order_id=?
+    `, [order.id]);
+    result.push({ ...order, items });
+  }
+  res.json(result);
+}));
+
 app.post("/api/products/import", authMiddleware, requireRoles("admin"), wrap(async (req, res) => {
   const workbook = XLSX.read(req.body.base64, { type: "base64" });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
@@ -743,6 +838,34 @@ async function startServer() {
         user_id INT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_product_movement (product_id),
+        FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB
+    `);
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS orders (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        order_code VARCHAR(30) NOT NULL UNIQUE,
+        customer_name VARCHAR(100) NOT NULL,
+        phone VARCHAR(20) NOT NULL,
+        address VARCHAR(255) NOT NULL,
+        payment_method VARCHAR(20) NOT NULL DEFAULT 'cod',
+        payment_status VARCHAR(20) NOT NULL DEFAULT 'pending',
+        status VARCHAR(20) NOT NULL DEFAULT 'pending',
+        total_amount DECIMAL(15,2) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_orders_user (user_id)
+      ) ENGINE=InnoDB
+    `);
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS order_items (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        order_id INT NOT NULL,
+        product_id INT NOT NULL,
+        quantity INT NOT NULL,
+        unit_price DECIMAL(15,2) NOT NULL,
+        INDEX idx_order_items_order (order_id),
+        FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
         FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
       ) ENGINE=InnoDB
     `);

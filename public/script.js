@@ -2,6 +2,7 @@ const $=(s)=>document.querySelector(s);
 const esc=(s)=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const money=(n)=>Number(n||0).toLocaleString("vi-VN")+" đ";
 let me=null, products=[], categories=[], brands=[], editingId=null, imageData=null, toastTimer;
+let cart=JSON.parse(localStorage.cart||"[]");
 
 async function api(path,method="GET",body){
   const res=await fetch("/api"+path,{method,headers:{"Content-Type":"application/json",Authorization:"Bearer "+(localStorage.token||"")},body:body?JSON.stringify(body):undefined});
@@ -19,6 +20,24 @@ $("#loginForm").addEventListener("submit",run(async e=>{
   const r=await api("/login","POST",{username:$("#username").value,password:$("#password").value});
   localStorage.token=r.token;start(r.user);
 }));
+document.querySelectorAll("[data-auth]").forEach(button=>button.onclick=()=>{
+  document.querySelectorAll("[data-auth]").forEach(b=>b.classList.toggle("on",b===button));
+  $("#loginForm").hidden=button.dataset.auth!== "login";
+  $("#registerForm").hidden=button.dataset.auth!== "register";
+});
+$("#registerForm").addEventListener("submit",run(async e=>{
+  e.preventDefault();
+  const username=$("#registerUsername").value;
+  const r=await api("/register","POST",{
+    full_name:$("#registerFullName").value,
+    username,
+    password:$("#registerPassword").value
+  });
+  toast(r.message);
+  $("#registerForm").reset();
+  document.querySelector('[data-auth="login"]').click();
+  $("#username").value=username;
+}));
 $("#logout").onclick=()=>{localStorage.removeItem("token");location.reload()};
 
 async function start(user){
@@ -29,6 +48,7 @@ async function start(user){
   document.querySelectorAll(".writeRole").forEach(el=>el.classList.toggle("disabled",!writable));
   document.querySelectorAll(".writeRole").forEach(el=>el.disabled=!writable);
   document.querySelectorAll(".adminOnly").forEach(el=>el.hidden=me.role!=="admin");
+  document.querySelectorAll(".customerOnly").forEach(el=>el.hidden=me.role==="admin");
   await loadCatalog();
   document.querySelectorAll(".tabs button").forEach(b=>b.classList.toggle("on",b.dataset.tab==="dashboard"));
   showTab(me.role==="admin"?"dashboard":"products");
@@ -42,6 +62,7 @@ async function showTab(name){
   if(name==="catalog")loadCatalog();
   if(name==="inventory")loadInventory();
   if(name==="users")loadUsers();
+  if(name==="orders")loadOrders();
 }
 (async()=>{if(localStorage.token){try{start(await api("/me"))}catch{localStorage.removeItem("token");$("#login").hidden=false}}})();
 
@@ -71,6 +92,16 @@ let productTimer;
 const loadProducts=run(async()=>{
   const q=new URLSearchParams({search:$("#productSearch").value.trim(),category:$("#categoryFilter").value,brand:$("#brandFilter").value,status:$("#statusFilter").value,sort:$("#sortFilter").value});
   products=await api("/products?"+q);
+  $("#productGrid").hidden=me.role==="admin";
+  $("#productGrid").innerHTML=me.role==="admin"?"":products.length?products.filter(p=>p.status==="active"&&p.quantity>0).map(p=>`
+    <article class="productCard">
+      <div class="productImage">${p.image?`<img src="${esc(p.image)}" alt="${esc(p.name)}">`:"<span class='productImagePlaceholder'>Chưa có ảnh</span>"}</div>
+      <div class="productInfo">
+        <h3>${esc(p.name)}</h3>
+        <div class="productMeta">${esc(p.category_name||"Chưa phân danh mục")} · ${esc(p.brand_name||"")}</div>
+        <div class="productBottom"><strong class="productPrice">${money(p.price)}</strong><button class="btn" data-add-cart="${p.id}" ${p.quantity<=0?"disabled":""}>Thêm giỏ</button></div>
+      </div>
+    </article>`).join(""):`<div class="empty">Không tìm thấy sản phẩm</div>`;
   const costColumn=me.role==="admin"?'<th class="r">Giá nhập</th>':"";
   const brandColumn=me.role==="admin"?'<th>Thương hiệu</th>':"";
   const thead=$("#productRows").parentElement.querySelector("thead tr");
@@ -127,3 +158,72 @@ $("#userRows").addEventListener("click",run(async e=>{
     toast(lock.dataset.locked==="0"?"Đã khóa tài khoản":"Đã mở khóa tài khoản");loadUsers();
   }
 }));
+
+function saveCart(){localStorage.cart=JSON.stringify(cart);renderCart();}
+function cartTotal(){return cart.reduce((sum,item)=>sum+Number(item.price)*Number(item.quantity),0);}
+function renderCart(){
+  const count=cart.reduce((sum,item)=>sum+Number(item.quantity),0);
+  $("#cartCount").textContent=count;
+  $("#cartItems").innerHTML=cart.length?cart.map(item=>`
+    <div class="cartItem">
+      ${item.image?`<img src="${esc(item.image)}" alt="">`:"<span class='cartPlaceholder'></span>"}
+      <div><strong>${esc(item.name)}</strong><small>${money(item.price)}</small><div class="qty"><button data-cart-dec="${item.id}" aria-label="Giảm số lượng">−</button><span>${item.quantity}</span><button data-cart-inc="${item.id}" aria-label="Tăng số lượng">+</button></div></div>
+      <button class="iconButton" data-cart-remove="${item.id}" aria-label="Xóa sản phẩm">×</button>
+    </div>`).join(""):"<div class='empty'>Giỏ hàng đang trống</div>";
+  $("#cartTotal").textContent=money(cartTotal());
+  $("#checkoutTotal").textContent=money(cartTotal());
+  $("#checkoutButton").disabled=!cart.length;
+}
+$("#productGrid").addEventListener("click",e=>{
+  const b=e.target.closest("[data-add-cart]");
+  if(!b)return;
+  const p=products.find(item=>item.id==b.dataset.addCart);
+  if(!p||p.status==="inactive")return;
+  const existing=cart.find(item=>item.id===p.id);
+  if(existing&&existing.quantity>=p.quantity)return toast("Số lượng vượt quá tồn kho.",true);
+  if(existing)existing.quantity++;
+  else cart.push({id:p.id,name:p.name,price:p.price,image:p.image,quantity:1});
+  saveCart();toast("Đã thêm vào giỏ hàng");
+});
+$("#cartButton").onclick=()=>$("#cartDialog").showModal();
+$("#closeCart").onclick=()=>$("#cartDialog").close();
+$("#cartItems").addEventListener("click",e=>{
+  const dec=e.target.closest("[data-cart-dec]");
+  const inc=e.target.closest("[data-cart-inc]");
+  const remove=e.target.closest("[data-cart-remove]");
+  if(dec){const item=cart.find(x=>x.id==dec.dataset.cartDec);if(item.quantity<=1)cart=cart.filter(x=>x.id!=item.id);else item.quantity--;saveCart();}
+  if(inc){const item=cart.find(x=>x.id==inc.dataset.cartInc);const stock=products.find(p=>p.id==item?.id)?.quantity||0;if(item&&item.quantity<stock)item.quantity++;else toast("Số lượng vượt quá tồn kho.",true);saveCart();}
+  if(remove){cart=cart.filter(x=>x.id!=remove.dataset.cartRemove);saveCart();}
+});
+$("#checkoutButton").onclick=()=>{
+  if(!cart.length)return toast("Giỏ hàng đang trống.",true);
+  $("#cartDialog").close();
+  $("#checkoutName").value=me.full_name||"";
+  $("#checkoutTotal").textContent=money(cartTotal());
+  $("#checkoutDialog").showModal();
+};
+$("#closeCheckout").onclick=()=>$("#checkoutDialog").close();
+$("#checkoutForm").addEventListener("submit",run(async e=>{
+  e.preventEvent?.();
+  e.preventDefault();
+  const r=await api("/checkout","POST",{
+    items:cart.map(item=>({product_id:item.id,quantity:item.quantity})),
+    customer_name:$("#checkoutName").value,
+    phone:$("#checkoutPhone").value,
+    address:$("#checkoutAddress").value,
+    payment_method:$("#paymentMethod").value
+  });
+  cart=[];saveCart();$("#checkoutDialog").close();toast(`${r.message} Mã đơn: ${r.order_code}`);
+  loadProducts();loadOrders();
+}));
+const loadOrders=run(async()=>{
+  const orders=await api("/orders");
+  const labels={pending:"Chờ xử lý",paid:"Đã thanh toán",shipped:"Đang giao",completed:"Hoàn tất",cancelled:"Đã hủy"};
+  $("#orderList").innerHTML=orders.length?orders.map(o=>`
+    <article class="orderCard">
+      <div class="orderHead"><div><strong>${esc(o.order_code)}</strong><small class="muted"> · ${esc(o.created_at)}</small></div><span class="status active">${labels[o.status]||esc(o.status)}</span></div>
+      <ul>${o.items.map(i=>`<li>${esc(i.name)} × ${i.quantity} — ${money(i.price*i.quantity)}</li>`).join("")}</ul>
+      <div class="cartSummary"><span>Thanh toán: ${esc(o.payment_method==="cod"?"COD":o.payment_method==="bank"?"Chuyển khoản":"Thẻ")}</span><strong>${money(o.total_amount)}</strong></div>
+    </article>`).join(""):"<div class='empty'>Bạn chưa có đơn hàng nào</div>";
+});
+renderCart();

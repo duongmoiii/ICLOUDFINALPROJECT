@@ -8,12 +8,24 @@
 </head>
 <body>
 <section id="login" class="login">
-  <form id="loginForm" class="login-box">
-    <h1>Quản lý kho</h1><p class="muted">Đăng nhập hệ thống</p>
-    <label>Tên đăng nhập<input id="username" required autocomplete="username"></label>
-    <label>Mật khẩu<input id="password" type="password" required autocomplete="current-password"></label>
-    <button class="btn">Đăng nhập</button>
-  </form>
+  <div class="login-box">
+    <div class="authBrand"><span class="brandMark">KH</span><div><h1>Kho hàng</h1><p class="muted">Mua sắm và quản lý kho</p></div></div>
+    <div class="authTabs">
+      <button type="button" class="on" data-auth="login">Đăng nhập</button>
+      <button type="button" data-auth="register">Đăng ký</button>
+    </div>
+    <form id="loginForm">
+      <label for="username">Tên đăng nhập<input id="username" required autocomplete="username"></label>
+      <label for="password">Mật khẩu<input id="password" type="password" required autocomplete="current-password"></label>
+      <button class="btn wide">Đăng nhập</button>
+    </form>
+    <form id="registerForm" hidden>
+      <label for="registerFullName">Họ và tên<input id="registerFullName" required maxlength="100"></label>
+      <label for="registerUsername">Tên đăng nhập<input id="registerUsername" required maxlength="50"></label>
+      <label for="registerPassword">Mật khẩu<input id="registerPassword" type="password" minlength="6" required autocomplete="new-password"></label>
+      <button class="btn wide">Tạo tài khoản</button>
+    </form>
+  </div>
 </section>
 <div id="app" hidden>
   <header class="top">
@@ -24,8 +36,12 @@
       <button data-tab="catalog" class="adminOnly">Danh mục & thương hiệu</button>
       <button data-tab="inventory" class="adminOnly">Tồn kho</button>
       <button data-tab="users" class="adminOnly">Tài khoản</button>
+      <button data-tab="orders" class="customerOnly">Đơn hàng</button>
     </nav>
-    <div class="who"><span id="whoami"></span><button id="logout" class="btn ghost">Thoát</button></div>
+    <div class="who">
+      <button id="cartButton" class="cartButton customerOnly" aria-label="Mở giỏ hàng">Giỏ hàng <span id="cartCount">0</span></button>
+      <span id="whoami"></span><button id="logout" class="btn ghost">Thoát</button>
+    </div>
   </header>
   <main>
     <section id="dashboard" class="view">
@@ -47,7 +63,8 @@
           <button id="addProduct" class="btn writeRole">Thêm sản phẩm</button>
         </div>
         <input id="importFile" type="file" accept=".xlsx,.xls,.csv" hidden>
-        <div class="scroll"><table><thead><tr><th>Ảnh</th><th>SKU</th><th>Tên</th><th>Danh mục</th><th>Thương hiệu</th><th class="r">Giá nhập</th><th class="r">Giá bán</th><th class="r">Tồn</th><th>Trạng thái</th><th></th></tr></thead><tbody id="productRows"></tbody></table></div>
+        <div id="productGrid" class="productGrid"></div>
+        <div id="productTable" class="scroll adminOnly"><table><thead><tr><th>Ảnh</th><th>SKU</th><th>Tên</th><th>Danh mục</th><th>Thương hiệu</th><th class="r">Giá nhập</th><th class="r">Giá bán</th><th class="r">Tồn</th><th>Trạng thái</th><th></th></tr></thead><tbody id="productRows"></tbody></table></div>
       </div>
     </section>
     <section id="catalog" class="view" hidden>
@@ -65,6 +82,9 @@
     <section id="users" class="view" hidden>
       <div class="panel"><div class="row between"><h2>Tài khoản & phân quyền</h2><button id="addUser" class="btn">Tạo tài khoản</button></div><div class="scroll"><table><thead><tr><th>ID</th><th>Tài khoản</th><th>Họ tên</th><th>Quyền</th><th>Trạng thái</th><th></th></tr></thead><tbody id="userRows"></tbody></table></div></div>
     </section>
+    <section id="orders" class="view customerOnly" hidden>
+      <div class="panel"><div class="row between"><div><h2>Đơn hàng của tôi</h2><p class="muted">Theo dõi trạng thái và lịch sử thanh toán</p></div></div><div id="orderList" class="orderList"></div></div>
+    </section>
   </main>
 </div>
 <dialog id="productDialog"><form id="productForm" class="form">
@@ -81,6 +101,21 @@
   <h2>Tạo tài khoản</h2><label>Tài khoản<input id="newUsername" required></label><label>Họ tên<input id="newFullName" required></label><label>Mật khẩu<input id="newPassword" type="password" minlength="6" required></label>
   <label>Quyền<select id="newRole"><option value="viewer">Người chỉ xem</option><option value="admin">Quản lý</option></select></label>
   <div class="row end"><button type="button" id="closeUser" class="btn ghost">Hủy</button><button class="btn">Tạo</button></div>
+</form></dialog>
+<dialog id="cartDialog"><div class="cartDialog">
+  <div class="row between"><h2>Giỏ hàng</h2><button type="button" id="closeCart" class="iconButton" aria-label="Đóng giỏ hàng">×</button></div>
+  <div id="cartItems"></div>
+  <div class="cartSummary"><span>Tạm tính</span><strong id="cartTotal">0 đ</strong></div>
+  <button id="checkoutButton" class="btn wide">Thanh toán</button>
+</div></dialog>
+<dialog id="checkoutDialog"><form id="checkoutForm" class="form">
+  <h2>Thông tin thanh toán</h2>
+  <label>Họ tên người nhận<input id="checkoutName" required maxlength="100"></label>
+  <label>Số điện thoại<input id="checkoutPhone" required maxlength="20" inputmode="tel"></label>
+  <label>Địa chỉ giao hàng<input id="checkoutAddress" required maxlength="255"></label>
+  <label>Phương thức thanh toán<select id="paymentMethod"><option value="cod">Thanh toán khi nhận hàng (COD)</option><option value="bank">Chuyển khoản ngân hàng</option><option value="card">Thẻ tín dụng/ghi nợ</option></select></label>
+  <div class="checkoutTotal"><span>Tổng thanh toán</span><strong id="checkoutTotal">0 đ</strong></div>
+  <div class="row end"><button type="button" id="closeCheckout" class="btn ghost">Quay lại</button><button class="btn">Đặt hàng</button></div>
 </form></dialog>
 <div id="toast" class="toast"></div>
 <script src="script.js"></script>
