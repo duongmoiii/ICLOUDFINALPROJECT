@@ -8,6 +8,7 @@ const PHONE_RE = /^[0-9+\s.-]{8,20}$/;
 
 let me = null, products = [], shopItems = [], cartProducts = new Map();
 let categories = [], brands = [], cart = [];
+let selectedCatalog = null, catalogProducts = [];
 let editingId = null, imageData = null, detailProduct = null, buyProduct = null;
 let toastTimer, productTimer, shopTimer;
 
@@ -108,24 +109,163 @@ const loadStats = run(async () => {
 });
 
 /* ================= DANH MỤC & THƯƠNG HIỆU ================= */
+function renderCatalogLists() {
+  const del = (attr, id) => me.role === "admin" ? `<button class="btn ghost sm danger" ${attr}="${id}" title="Xóa">Xóa</button>` : "";
+  $("#categories").innerHTML = categories.map(c => {
+    const isSelected = selectedCatalog?.type === "category" && selectedCatalog?.id == c.id;
+    const count = c.product_count != null ? `<span class="catCount">${c.product_count} SP</span>` : "";
+    return `<div class="listRow catalogItem${isSelected ? " active" : ""}" data-catalog-type="category" data-id="${c.id}" data-name="${esc(c.name)}">
+      <span class="catalogItemName">${esc(c.name)} ${count}</span>
+      <div class="row" onclick="event.stopPropagation()">${del("data-delete-category", c.id)}</div>
+    </div>`;
+  }).join("") || "<div class='empty'>Chưa có danh mục.</div>";
+
+  $("#brands").innerHTML = brands.map(b => {
+    const isSelected = selectedCatalog?.type === "brand" && selectedCatalog?.id == b.id;
+    const count = b.product_count != null ? `<span class="catCount">${b.product_count} SP</span>` : "";
+    return `<div class="listRow catalogItem${isSelected ? " active" : ""}" data-catalog-type="brand" data-id="${b.id}" data-name="${esc(b.name)}">
+      <span class="catalogItemName">${esc(b.name)} ${count}</span>
+      <div class="row" onclick="event.stopPropagation()">${del("data-delete-brand", b.id)}</div>
+    </div>`;
+  }).join("") || "<div class='empty'>Chưa có thương hiệu.</div>";
+}
+
+async function loadCatalogProducts() {
+  if (!selectedCatalog) {
+    $("#catalogProductsPanel").hidden = true;
+    return;
+  }
+  const { type, id, name } = selectedCatalog;
+  const isCat = type === "category";
+  const label = isCat ? "danh mục" : "thương hiệu";
+  $("#catalogProductsTitle").innerHTML = `Sản phẩm thuộc ${label}: <span style="color:var(--pri)">${esc(name)}</span>`;
+  $("#catalogProductsSubtitle").textContent = "Đang tải danh sách sản phẩm...";
+  $("#catalogProductsPanel").hidden = false;
+
+  const q = isCat ? `category=${id}` : `brand=${id}`;
+  catalogProducts = await api(`/products?${q}`);
+
+  $("#catalogProductsSubtitle").textContent = `Tổng cộng: ${catalogProducts.length} sản phẩm`;
+  if (catalogProducts.length) {
+    $("#catalogProductsGrid").innerHTML = catalogProducts.map(p => productCard(p, true)).join("");
+  } else {
+    $("#catalogProductsGrid").innerHTML = `<div class="empty" style="grid-column: 1 / -1; padding: 24px 0;">
+      <p>Chưa có sản phẩm nào thuộc ${label} này.</p>
+      <button type="button" class="btn sm" id="catalogAddProductQuick" style="margin-top: 8px;">+ Thêm sản phẩm vào ${label} này</button>
+    </div>`;
+  }
+}
+
+function closeCatalogProducts() {
+  selectedCatalog = null;
+  $("#catalogProductsPanel").hidden = true;
+  renderCatalogLists();
+}
+
 async function loadCatalog() {
   [categories, brands] = await Promise.all([api("/categories"), api("/brands")]);
   const catOpts = categories.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join("");
   const brandOpts = brands.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join("");
   $("#categoryFilter").innerHTML = '<option value="">Tất cả danh mục</option>' + catOpts;
   $("#shopCategory").innerHTML = '<option value="">Tất cả danh mục</option>' + catOpts;
+  if ($("#shopBrand")) $("#shopBrand").innerHTML = '<option value="">Tất cả thương hiệu</option>' + brandOpts;
   $("#brandFilter").innerHTML = '<option value="">Tất cả thương hiệu</option>' + brandOpts;
   $("#productCategory").innerHTML = '<option value="">Không có</option>' + catOpts;
   $("#productBrand").innerHTML = '<option value="">Không có</option>' + brandOpts;
-  const del = (attr, id) => me.role === "admin" ? `<button class="btn ghost sm danger" ${attr}="${id}">Xóa</button>` : "";
-  $("#categories").innerHTML = categories.map(c => `<div class="listRow"><span>${esc(c.name)}</span>${del("data-delete-category", c.id)}</div>`).join("") || "<div class='empty'>Chưa có danh mục.</div>";
-  $("#brands").innerHTML = brands.map(b => `<div class="listRow"><span>${esc(b.name)}</span>${del("data-delete-brand", b.id)}</div>`).join("") || "<div class='empty'>Chưa có thương hiệu.</div>";
+  renderCatalogLists();
+  if (selectedCatalog) {
+    const list = selectedCatalog.type === "category" ? categories : brands;
+    const item = list.find(x => x.id == selectedCatalog.id);
+    if (item) {
+      selectedCatalog.name = item.name;
+      loadCatalogProducts();
+    } else {
+      closeCatalogProducts();
+    }
+  }
 }
 const loadCatalogRun = run(loadCatalog);
 $("#catalog").addEventListener("click", run(async e => {
-  const b = e.target.closest("button"); if (!b) return;
-  if (b.dataset.deleteCategory) { await api("/categories/" + b.dataset.deleteCategory, "DELETE"); toast("Đã xóa danh mục"); loadCatalogRun() }
-  if (b.dataset.deleteBrand) { await api("/brands/" + b.dataset.deleteBrand, "DELETE"); toast("Đã xóa thương hiệu"); loadCatalogRun() }
+  const b = e.target.closest("button");
+  if (b) {
+    if (b.dataset.deleteCategory) {
+      if (!confirm("Xóa danh mục này?")) return;
+      await api("/categories/" + b.dataset.deleteCategory, "DELETE");
+      toast("Đã xóa danh mục");
+      if (selectedCatalog?.type === "category" && selectedCatalog?.id == b.dataset.deleteCategory) {
+        closeCatalogProducts();
+      }
+      loadCatalogRun();
+      return;
+    }
+    if (b.dataset.deleteBrand) {
+      if (!confirm("Xóa thương hiệu này?")) return;
+      await api("/brands/" + b.dataset.deleteBrand, "DELETE");
+      toast("Đã xóa thương hiệu");
+      if (selectedCatalog?.type === "brand" && selectedCatalog?.id == b.dataset.deleteBrand) {
+        closeCatalogProducts();
+      }
+      loadCatalogRun();
+      return;
+    }
+    if (b.id === "catalogCloseProducts") {
+      closeCatalogProducts();
+      return;
+    }
+    if (b.id === "catalogViewInProductsTab") {
+      if (!selectedCatalog) return;
+      if (selectedCatalog.type === "category") {
+        $("#categoryFilter").value = selectedCatalog.id;
+        $("#brandFilter").value = "";
+      } else {
+        $("#brandFilter").value = selectedCatalog.id;
+        $("#categoryFilter").value = "";
+      }
+      $("#productSearch").value = "";
+      $("#statusFilter").value = "";
+      showTab("products");
+      return;
+    }
+    if (b.id === "catalogAddProductQuick") {
+      openProduct(null);
+      if (selectedCatalog?.type === "category") {
+        $("#productCategory").value = selectedCatalog.id;
+      } else if (selectedCatalog?.type === "brand") {
+        $("#productBrand").value = selectedCatalog.id;
+      }
+      return;
+    }
+  }
+
+  const item = e.target.closest(".catalogItem");
+  if (item) {
+    const type = item.dataset.catalogType;
+    const id = Number(item.dataset.id);
+    const name = item.dataset.name;
+
+    if (selectedCatalog?.type === type && selectedCatalog?.id === id) {
+      closeCatalogProducts();
+    } else {
+      selectedCatalog = { type, id, name };
+      renderCatalogLists();
+      await loadCatalogProducts();
+    }
+  }
+}));
+$("#catalogProductsGrid").addEventListener("click", run(async e => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  if (b.dataset.edit) {
+    const p = catalogProducts.find(x => x.id == b.dataset.edit) || products.find(x => x.id == b.dataset.edit);
+    if (p) openProduct(p);
+  }
+  if (b.dataset.delete && confirm("Xóa sản phẩm này?")) {
+    await api("/products/" + b.dataset.delete, "DELETE");
+    toast("Đã xóa sản phẩm");
+    loadProducts();
+    loadCatalogRun();
+    if (selectedCatalog) loadCatalogProducts();
+  }
 }));
 $("#addCategory").onclick = run(async () => { const name = prompt("Tên danh mục"); if (name) { await api("/categories", "POST", { name }); loadCatalog(); toast("Đã thêm danh mục") } });
 $("#addBrand").onclick = run(async () => { const name = prompt("Tên thương hiệu"); if (name) { await api("/brands", "POST", { name }); loadCatalog(); toast("Đã thêm thương hiệu") } });
@@ -191,12 +331,21 @@ $("#productForm").onsubmit = run(async e => {
   e.preventDefault();
   const b = { sku: $("#sku").value, product_code: $("#sku").value, name: $("#productName").value, category_id: Number($("#productCategory").value) || null, brand_id: Number($("#productBrand").value) || null, image: imageData, cost_price: Number($("#costPrice").value), price: Number($("#sellingPrice").value), quantity: Number($("#quantity").value), low_stock_threshold: Number($("#threshold").value), status: $("#productStatus").value };
   await api(editingId ? "/products/" + editingId : "/products", editingId ? "PUT" : "POST", b);
-  $("#productDialog").close(); toast("Đã lưu sản phẩm"); loadProducts();
+  $("#productDialog").close(); toast("Đã lưu sản phẩm");
+  loadProducts();
+  loadCatalogRun();
+  if (selectedCatalog) loadCatalogProducts();
 });
 $("#productGrid").addEventListener("click", run(async e => {
   const b = e.target.closest("button"); if (!b) return;
   if (b.dataset.edit) openProduct(products.find(p => p.id == b.dataset.edit));
-  if (b.dataset.delete && confirm("Xóa sản phẩm này?")) { await api("/products/" + b.dataset.delete, "DELETE"); toast("Đã xóa sản phẩm"); loadProducts() }
+  if (b.dataset.delete && confirm("Xóa sản phẩm này?")) {
+    await api("/products/" + b.dataset.delete, "DELETE");
+    toast("Đã xóa sản phẩm");
+    loadProducts();
+    loadCatalogRun();
+    if (selectedCatalog) loadCatalogProducts();
+  }
 }));
 
 $("#importBtn").onclick = () => $("#importFile").click();
@@ -267,12 +416,18 @@ $("#myOrders").addEventListener("click", run(async e => {
 
 /* ================= MUA SẮM (KHÁCH HÀNG) ================= */
 const loadShop = run(async () => {
-  const q = new URLSearchParams({ search: $("#shopSearch").value.trim(), category: $("#shopCategory").value, sort: $("#shopSort").value });
+  const q = new URLSearchParams({
+    search: $("#shopSearch").value.trim(),
+    category: $("#shopCategory").value,
+    brand: $("#shopBrand") ? $("#shopBrand").value : "",
+    sort: $("#shopSort").value
+  });
   shopItems = await api("/products?" + q);
   $("#shopGrid").innerHTML = shopItems.length ? shopItems.map(p => productCard(p, false)).join("") : "<div class='empty'>Không tìm thấy sản phẩm phù hợp.</div>";
 });
 $("#shopSearch").addEventListener("input", () => { clearTimeout(shopTimer); shopTimer = setTimeout(loadShop, 250) });
 $("#shopCategory").onchange = () => loadShop();
+if ($("#shopBrand")) $("#shopBrand").onchange = () => loadShop();
 $("#shopSort").onchange = () => loadShop();
 $("#shopGrid").addEventListener("click", run(async e => {
   const add = e.target.closest("[data-add]");

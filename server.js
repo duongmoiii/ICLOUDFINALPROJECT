@@ -214,7 +214,13 @@ app.delete("/api/products/:id", authMiddleware, requireRoles("admin"), wrap(asyn
 }));
 
 app.get("/api/categories", wrap(async (req, res) => {
-  const [rows] = await pool.execute("SELECT * FROM categories ORDER BY name");
+  const [rows] = await pool.execute(`
+    SELECT c.id, c.name, c.created_at, COUNT(p.id) AS product_count
+    FROM categories c
+    LEFT JOIN products p ON p.category_id = c.id
+    GROUP BY c.id, c.name, c.created_at
+    ORDER BY c.name
+  `);
   res.json(rows);
 }));
 app.post("/api/categories", authMiddleware, requireRoles("admin"), wrap(async (req, res) => {
@@ -229,7 +235,13 @@ app.delete("/api/categories/:id", authMiddleware, requireRoles("admin"), wrap(as
 }));
 
 app.get("/api/brands", wrap(async (req, res) => {
-  const [rows] = await pool.execute("SELECT * FROM brands ORDER BY name");
+  const [rows] = await pool.execute(`
+    SELECT b.id, b.name, b.created_at, COUNT(p.id) AS product_count
+    FROM brands b
+    LEFT JOIN products p ON p.brand_id = b.id
+    GROUP BY b.id, b.name, b.created_at
+    ORDER BY b.name
+  `);
   res.json(rows);
 }));
 app.post("/api/brands", authMiddleware, requireRoles("admin"), wrap(async (req, res) => {

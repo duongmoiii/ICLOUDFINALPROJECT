@@ -79,8 +79,30 @@
 
     <section id="catalog" class="view" hidden>
       <div class="grid2">
-        <div class="panel"><div class="row between"><h2>Danh mục</h2><button id="addCategory" class="btn">Thêm</button></div><div id="categories"></div></div>
-        <div class="panel"><div class="row between"><h2>Thương hiệu</h2><button id="addBrand" class="btn">Thêm</button></div><div id="brands"></div></div>
+        <div class="panel">
+          <div class="row between"><h2>Danh mục</h2><button id="addCategory" class="btn">Thêm</button></div>
+          <p class="muted small" style="margin-top: -6px; margin-bottom: 12px">Nhấp vào danh mục để xem danh sách sản phẩm liên quan</p>
+          <div id="categories"></div>
+        </div>
+        <div class="panel">
+          <div class="row between"><h2>Thương hiệu</h2><button id="addBrand" class="btn">Thêm</button></div>
+          <p class="muted small" style="margin-top: -6px; margin-bottom: 12px">Nhấp vào thương hiệu để xem danh sách sản phẩm liên quan</p>
+          <div id="brands"></div>
+        </div>
+      </div>
+
+      <div class="panel" id="catalogProductsPanel" hidden>
+        <div class="row between" style="margin-bottom: 16px; border-bottom: 1px solid var(--line); padding-bottom: 12px">
+          <div>
+            <h2 id="catalogProductsTitle" style="margin: 0">Sản phẩm liên quan</h2>
+            <small id="catalogProductsSubtitle" class="sub" style="margin-top: 4px"></small>
+          </div>
+          <div class="row">
+            <button id="catalogViewInProductsTab" class="btn ghost sm">Xem trong tab Sản phẩm</button>
+            <button id="catalogCloseProducts" class="btn ghost sm" title="Đóng danh sách">✕ Đóng</button>
+          </div>
+        </div>
+        <div id="catalogProductsGrid" class="grid"></div>
       </div>
     </section>
 
@@ -117,6 +139,7 @@
         <div class="toolbar">
           <input id="shopSearch" type="search" placeholder="Tìm sản phẩm theo tên hoặc SKU">
           <select id="shopCategory"><option value="">Tất cả danh mục</option></select>
+          <select id="shopBrand"><option value="">Tất cả thương hiệu</option></select>
           <select id="shopSort"><option value="newest">Mới nhất</option><option value="price_asc">Giá thấp đến cao</option><option value="price_desc">Giá cao đến thấp</option><option value="name_asc">Tên A-Z</option></select>
         </div>
         <div id="shopGrid" class="grid"></div>
